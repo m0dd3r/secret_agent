@@ -1,17 +1,19 @@
 use std::path::Path;
 use async_trait::async_trait;
-use tokio::fs;
-use async_openai::{
-    Client,
-    types::{CreateChatCompletionRequestArgs, ChatCompletionRequestMessage, Role},
+use rig::{
+    completion::Prompt,
+    providers::groq::Client as GroqClient,
 };
 use backoff::ExponentialBackoff;
 use serde::{Deserialize, Serialize};
-use crate::domain::{
-    models::{PerlModule, Subroutine},
-    traits::ModuleParser,
+use tokio::fs;
+use crate::{
+    domain::{
+        models::{PerlModule, Subroutine},
+        traits::ModuleParser,
+    },
+    error::Error as AIError,
 };
-use crate::error::Error;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ParsedSubroutine {
@@ -30,78 +32,59 @@ struct ParseResponse {
 }
 
 pub struct AIModuleParser {
-    client: Client,
+    client: GroqClient,
 }
 
 impl AIModuleParser {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
-    }
-
-    pub fn with_client(client: Client) -> Self {
+        let client = GroqClient::new("");
         Self { client }
     }
 
-    async fn analyze_code(&self, content: &str) -> Result<ParseResponse, Error> {
+    pub fn new_with_key(api_key: &str) -> Self {
+        let client = GroqClient::new(api_key);
+        Self { client }
+    }
+
+    pub fn with_client(client: GroqClient) -> Self {
+        Self { client }
+    }
+
+    async fn analyze_code(&self, content: &str) -> Result<ParseResponse, AIError> {
         let prompt = format!(
-            r#"Analyze this Perl module and extract its structure. Respond with a JSON object containing:
-            1. All subroutines (name, code, line numbers, and dependencies used within each sub)
-            2. Module-level dependencies (use/require statements)
-            3. Package name if present
+            r#"Analyze this Perl module and extract its structure. Return ONLY a raw JSON object (no markdown formatting, no code blocks) containing:
+            - package_name: The name of the Perl package/module
+            - subroutines: Array of objects, each containing:
+                - name: Subroutine name
+                - code: The complete subroutine code including its definition
+                - line_start: Starting line number
+                - line_end: Ending line number
+                - dependencies: Array of module/package names this subroutine depends on
+            - dependencies: Array of all module/package dependencies
 
-            Perl module:
-            ```perl
+            Module content:
             {}
-            ```
-
-            Format the response as a JSON object with this structure:
-            {{
-                "subroutines": [
-                    {{
-                        "name": "sub_name",
-                        "code": "complete sub code",
-                        "line_start": line_number,
-                        "line_end": line_number,
-                        "dependencies": ["modules", "used", "in", "sub"]
-                    }}
-                ],
-                "dependencies": ["all", "module", "level", "dependencies"],
-                "package_name": "Module::Name"
-            }}
-
-            Be precise with line numbers and include the complete subroutine code."#,
+            "#,
             content
         );
 
         let backoff = ExponentialBackoff::default();
         let response = backoff::future::retry(backoff, || async {
-            let response = self.client
-                .chat()
-                .create(CreateChatCompletionRequestArgs::default()
-                    .model("gpt-4")
-                    .messages([ChatCompletionRequestMessage {
-                        role: Role::User,
-                        content: prompt.clone(),
-                        name: None,
-                        function_call: None,
-                    }])
-                    .response_format(async_openai::types::ChatCompletionResponseFormat::json_object())
-                    .build()?
-                )
+            let agent = self.client
+                .agent("llama-3.3-70b-versatile")
+                .preamble("You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.")
+                .build();
+
+            let response = agent
+                .prompt(prompt.as_str())
                 .await
-                .map_err(|e| backoff::Error::Permanent(Error::AIError(e.to_string())))?;
+                .map_err(|e| backoff::Error::Permanent(AIError::AIError(e.to_string())))?;
 
-            let content = response.choices
-                .first()
-                .ok_or_else(|| backoff::Error::Permanent(Error::AIError("No response from AI".to_string())))?
-                .message.content
-                .as_ref()
-                .ok_or_else(|| backoff::Error::Permanent(Error::AIError("Empty response from AI".to_string())))?;
-
-            serde_json::from_str::<ParseResponse>(content)
-                .map_err(|e| backoff::Error::Permanent(Error::ParseError(format!("Failed to parse AI response: {}", e))))
+            serde_json::from_str::<ParseResponse>(&response)
+                .map_err(|e| {
+                    eprintln!("Failed to parse response content: {}", response);
+                    backoff::Error::Permanent(AIError::ParseError(format!("Failed to parse AI response: {}", e)))
+                })
         }).await?;
 
         Ok(response)
@@ -110,24 +93,26 @@ impl AIModuleParser {
 
 #[async_trait]
 impl ModuleParser for AIModuleParser {
-    async fn parse_module(&self, path: impl AsRef<Path> + Send) -> Result<PerlModule, Error> {
-        let content = fs::read_to_string(path.as_ref()).await
-            .map_err(|err| Error::IOError(err))?;
+    async fn parse_module(&self, path: impl AsRef<Path> + Send) -> Result<PerlModule, AIError> {
+        let content = fs::read_to_string(path.as_ref())
+            .await
+            .map_err(|e| AIError::IOError(e))?;
 
-        let analysis = self.analyze_code(&content).await?;
+        let response = self.analyze_code(&content).await?;
 
-        let subroutines = analysis.subroutines.into_iter()
-            .map(|sub| Subroutine {
-                name: sub.name,
-                code: sub.code,
-                line_start: sub.line_start,
-                line_end: sub.line_end,
-                dependencies: sub.dependencies,
+        let subroutines = response.subroutines
+            .into_iter()
+            .map(|s| Subroutine {
+                name: s.name,
+                code: s.code,
+                line_start: s.line_start,
+                line_end: s.line_end,
+                dependencies: s.dependencies,
             })
             .collect();
 
         Ok(PerlModule {
-            name: analysis.package_name.unwrap_or_else(|| {
+            name: response.package_name.unwrap_or_else(|| {
                 path.as_ref()
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -137,7 +122,7 @@ impl ModuleParser for AIModuleParser {
             path: path.as_ref().to_path_buf(),
             content,
             subroutines,
-            dependencies: analysis.dependencies,
+            dependencies: response.dependencies,
         })
     }
 }
@@ -145,94 +130,91 @@ impl ModuleParser for AIModuleParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use tempfile::NamedTempFile;
     use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{method, path};
-
-    #[tokio::test]
-    async fn test_parse_simple_module() -> Result<(), Box<dyn std::error::Error>> {
-        // Skip if no OPENAI_API_KEY
-        if env::var("OPENAI_API_KEY").is_err() {
-            return Ok(());
-        }
-
-        let content = r#"package Test::Module;
-use strict;
-use warnings;
-
-sub hello {
-    my ($name) = @_;
-    return "Hello, $name!";
-}
-
-sub goodbye {
-    my ($name) = @_;
-    return "Goodbye, $name!";
-}
-1;
-"#;
-        let temp_file = NamedTempFile::new()?;
-        fs::write(&temp_file, content).await?;
-
-        let parser = AIModuleParser::new();
-        let module = parser.parse_module(temp_file.path()).await?;
-
-        assert_eq!(module.name, "Test::Module");
-        assert!(!module.subroutines.is_empty());
-        assert!(module.dependencies.contains(&"strict".to_string()));
-        assert!(module.dependencies.contains(&"warnings".to_string()));
-
-        Ok(())
-    }
+    use wiremock::matchers::{body_json, header, method, path};
+    use serde_json::json;
+    use std::io::Write;
 
     #[tokio::test]
     async fn test_with_mock_ai() -> Result<(), Box<dyn std::error::Error>> {
+        // Start a mock server
         let mock_server = MockServer::start().await;
-        
+
+        // Create a mock response
         let mock_response = ParseResponse {
             subroutines: vec![
                 ParsedSubroutine {
                     name: "test_sub".to_string(),
-                    code: "sub test_sub { return 42; }".to_string(),
+                    code: "sub test_sub { }".to_string(),
                     line_start: 1,
                     line_end: 3,
-                    dependencies: vec![],
+                    dependencies: vec!["Test::More".to_string()],
                 },
             ],
-            dependencies: vec!["strict".to_string()],
-            package_name: Some("Test::Mock".to_string()),
+            dependencies: vec!["Test::More".to_string()],
+            package_name: Some("TestModule".to_string()),
         };
 
+        // Mock the chat completion endpoint
         Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{
-                    "message": {
-                        "content": serde_json::to_string(&mock_response)?
+            .and(path("/chat/completions"))
+            .and(header("Authorization", "Bearer test-key"))
+            .and(body_json(json!({
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {
+                        "content": "You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.",
+                        "role": "system"
+                    },
+                    {
+                        "content": format!(
+                            "Analyze this Perl module and extract its structure. Return ONLY a raw JSON object (no markdown formatting, no code blocks) containing:\n            - package_name: The name of the Perl package/module\n            - subroutines: Array of objects, each containing:\n                - name: Subroutine name\n                - code: The complete subroutine code including its definition\n                - line_start: Starting line number\n                - line_end: Ending line number\n                - dependencies: Array of module/package names this subroutine depends on\n            - dependencies: Array of all module/package dependencies\n\n            Module content:\n            {}\n            ",
+                            "package TestModule;\nuse Test::More;\nsub test_sub { }\n1;"
+                        ),
+                        "role": "user"
                     }
-                }]
+                ],
+                "temperature": null
             })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "test-id",
+                "object": "chat.completion",
+                "created": 1234567890,
+                "model": "llama-3.3-70b-versatile",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": serde_json::to_string(&mock_response)?
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150
+                }
+            })))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
-        let client = Client::with_config(
-            async_openai::config::Config::new()
-                .with_api_base(&mock_server.uri())
-                .with_api_key("test-key"),
-        );
+        // Create a temporary file with test Perl code
+        let mut temp_file = NamedTempFile::new()?;
+        write!(temp_file, "package TestModule;\nuse Test::More;\nsub test_sub {{ }}\n1;")?;
 
+        // Initialize the parser with the mock server URL
+        let client = GroqClient::from_url("test-key", mock_server.uri().as_str());
         let parser = AIModuleParser::with_client(client);
-        let content = "package Test::Mock;\nuse strict;\nsub test_sub { return 42; }\n";
-        let temp_file = NamedTempFile::new()?;
-        fs::write(&temp_file, content).await?;
 
+        // Parse the module
         let module = parser.parse_module(temp_file.path()).await?;
-        
-        assert_eq!(module.name, "Test::Mock");
+
+        // Verify the results
+        assert_eq!(module.name, "TestModule");
         assert_eq!(module.subroutines.len(), 1);
-        assert_eq!(module.subroutines[0].name, "test_sub");
-        assert!(module.dependencies.contains(&"strict".to_string()));
+        assert_eq!(module.dependencies, vec!["Test::More"]);
 
         Ok(())
     }
