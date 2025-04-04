@@ -17,6 +17,9 @@ pub enum Error {
     
     /// IO error occurred
     IOError(io::Error),
+
+    /// JSON serialization/deserialization error
+    SerdeError(String),
 }
 
 impl fmt::Display for Error {
@@ -27,6 +30,7 @@ impl fmt::Display for Error {
             Error::ValidationError(msg) => write!(f, "Validation error: {}", msg),
             Error::AIError(msg) => write!(f, "AI service error: {}", msg),
             Error::IOError(err) => write!(f, "IO error: {}", err),
+            Error::SerdeError(msg) => write!(f, "Serialization error: {}", msg),
         }
     }
 }
@@ -43,5 +47,11 @@ impl std::error::Error for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::IOError(err)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::SerdeError(err.to_string())
     }
 } 

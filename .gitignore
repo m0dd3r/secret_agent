@@ -24,3 +24,5 @@ Cargo.lock
 # OS specific files
 .DS_Store
 Thumbs.db
+
+**/*.rs.bk
