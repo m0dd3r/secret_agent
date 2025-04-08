@@ -7,6 +7,7 @@ use secret_agent::{
     domain::traits::ModuleParser,
     error::Error,
 };
+use rig::providers::azure::Client;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -32,12 +33,22 @@ async fn main() -> Result<(), Error> {
 
     let args = Args::parse();
 
-    // Get Groq API key from environment
-    let api_key = env::var("GROQ_API_KEY")
-        .map_err(|_| Error::AIError("GROQ_API_KEY environment variable not set. Please set it in your .env file.".to_string()))?;
+    // Get Azure Openai API key from environment
+    let api_key = env::var("AZURE_API_KEY")
+        .map_err(|_| Error::AIError("AZURE_API_KEY environment variable not set. Please set it in your .env file.".to_string()))?;
 
-    // Initialize the parser with API key
-    let parser = AIModuleParser::new_with_key(&api_key);
+    // Get Azure OpenAI API base URL from environment
+    let base_url = env::var("AZURE_API_BASE_URL")
+        .map_err(|_| Error::AIError("AZURE_API_BASE_URL environment variable not set. Please set it in your .env file.".to_string()))?;
+
+    // Get Azure OpenAI API base URL from environment
+    let api_version = env::var("AZURE_API_VERSION")
+        .map_err(|_| Error::AIError("AZURE_API_VERSION environment variable not set. Please set it in your .env file.".to_string()))?;
+
+    // Initialize the parser with API key and base url
+    let client = Client::from_api_key(&api_key, &api_version, &base_url);
+    let agent_builder = client.agent("gpt-4o-2024-08-06");
+    let parser = AIModuleParser::new(agent_builder);
 
     // Parse and analyze the module
     let module = parser.parse_module(&args.file).await?;

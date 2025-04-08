@@ -1,10 +1,12 @@
-use std::path::Path;
+use std::error::Error;
+use std::path::{Path};
 use async_trait::async_trait;
 use rig::{
     completion::Prompt,
-    providers::groq::Client as GroqClient,
+    agent::AgentBuilder,
 };
-use backoff::ExponentialBackoff;
+use rig::agent::Agent;
+use rig::completion::{CompletionModel};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use crate::{
@@ -31,23 +33,17 @@ struct ParseResponse {
     package_name: Option<String>,
 }
 
-pub struct AIModuleParser {
-    client: GroqClient,
+pub struct AIModuleParser<M: CompletionModel> {
+    agent: Agent<M>,
 }
 
-impl AIModuleParser {
-    pub fn new() -> Self {
-        let client = GroqClient::new("");
-        Self { client }
-    }
-
-    pub fn new_with_key(api_key: &str) -> Self {
-        let client = GroqClient::new(api_key);
-        Self { client }
-    }
-
-    pub fn with_client(client: GroqClient) -> Self {
-        Self { client }
+impl<M: CompletionModel> AIModuleParser<M> {
+    pub fn new(agent_builder: AgentBuilder<M>) -> Self {
+        Self {
+            agent: agent_builder
+                .preamble("You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.")
+                .build()
+        }
     }
 
     async fn analyze_code(&self, content: &str) -> Result<ParseResponse, AIError> {
@@ -68,31 +64,31 @@ impl AIModuleParser {
             content
         );
 
-        let backoff = ExponentialBackoff::default();
-        let response = backoff::future::retry(backoff, || async {
-            let agent = self.client
-                .agent("llama-3.3-70b-versatile")
-                .preamble("You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.")
-                .build();
+        let response = self
+            .agent
+            .prompt(prompt.as_str())
+            .await;
 
-            let response = agent
-                .prompt(prompt.as_str())
-                .await
-                .map_err(|e| backoff::Error::Permanent(AIError::AIError(e.to_string())))?;
+        let response = response
+            .map_err(|e| {
+                print!("{}", e.source().unwrap());
+                AIError::AIError(e.to_string())
+            })?;
 
-            serde_json::from_str::<ParseResponse>(&response)
-                .map_err(|e| {
-                    eprintln!("Failed to parse response content: {}", response);
-                    backoff::Error::Permanent(AIError::ParseError(format!("Failed to parse AI response: {}", e)))
-                })
-        }).await?;
+        print!("{}", response);
 
-        Ok(response)
+        let parse_response = serde_json::from_str::<ParseResponse>(&response)
+            .map_err(|e| {
+                eprintln!("Failed to parse response content: {}", response);
+                AIError::ParseError(format!("Failed to parse AI response: {}", e))
+            })?;
+
+        Ok(parse_response)
     }
 }
 
 #[async_trait]
-impl ModuleParser for AIModuleParser {
+impl<M: CompletionModel> ModuleParser for AIModuleParser<M> {
     async fn parse_module(&self, path: impl AsRef<Path> + Send) -> Result<PerlModule, AIError> {
         let content = fs::read_to_string(path.as_ref())
             .await
@@ -132,9 +128,10 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
     use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use serde_json::json;
     use std::io::Write;
+    use rig::providers::azure::Client;
 
     #[tokio::test]
     async fn test_with_mock_ai() -> Result<(), Box<dyn std::error::Error>> {
@@ -158,22 +155,33 @@ mod tests {
 
         // Mock the chat completion endpoint
         Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(header("Authorization", "Bearer test-key"))
+            .and(path("/openai/deployments/gpt-4o-2024-08-06/chat/completions"))
+            .and(query_param("api-version", "test-version"))
+            .and(header("api-key", "test-key"))
             .and(body_json(json!({
-                "model": "llama-3.3-70b-versatile",
-                "messages": [
+                "model": "gpt-4o-2024-08-06",
+                "messages":
+                [
                     {
-                        "content": "You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.",
-                        "role": "system"
+                        "content": [
+                            {
+                            "text":"You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.",
+                            "type": "text",
+                            }
+                        ],
+                        "role": "system",
                     },
                     {
-                        "content": format!(
+                        "content": [
+                        {
+                            "text": format!(
                             "Analyze this Perl module and extract its structure. Return ONLY a raw JSON object (no markdown formatting, no code blocks) containing:\n            - package_name: The name of the Perl package/module\n            - subroutines: Array of objects, each containing:\n                - name: Subroutine name\n                - code: The complete subroutine code including its definition\n                - line_start: Starting line number\n                - line_end: Ending line number\n                - dependencies: Array of module/package names this subroutine depends on\n            - dependencies: Array of all module/package dependencies\n\n            Module content:\n            {}\n            ",
-                            "package TestModule;\nuse Test::More;\nsub test_sub { }\n1;"
-                        ),
-                        "role": "user"
-                    }
+                            "package TestModule;\nuse Test::More;\nsub test_sub { }\n1;"),
+                            "type": "text",
+                            }
+                        ],
+                        "role": "user",
+                    },
                 ],
                 "temperature": null
             })))
@@ -181,7 +189,7 @@ mod tests {
                 "id": "test-id",
                 "object": "chat.completion",
                 "created": 1234567890,
-                "model": "llama-3.3-70b-versatile",
+                "model": "gpt-4o-2024-08-06",
                 "choices": [{
                     "index": 0,
                     "message": {
@@ -205,8 +213,9 @@ mod tests {
         write!(temp_file, "package TestModule;\nuse Test::More;\nsub test_sub {{ }}\n1;")?;
 
         // Initialize the parser with the mock server URL
-        let client = GroqClient::from_url("test-key", mock_server.uri().as_str());
-        let parser = AIModuleParser::with_client(client);
+        let client = Client::from_api_key("test-key", "test-version", mock_server.uri().as_str());
+        let agent_builder = AgentBuilder::new(client.completion_model("gpt-4o-2024-08-06"));
+        let parser = AIModuleParser::new(agent_builder);
 
         // Parse the module
         let module = parser.parse_module(temp_file.path()).await?;
