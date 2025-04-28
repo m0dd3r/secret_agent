@@ -1,13 +1,7 @@
 use std::path::PathBuf;
-use std::env;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use dotenv::dotenv;
-use secret_agent::{
-    parser::AIModuleParser,
-    domain::traits::ModuleParser,
-    error::Error,
-};
-use rig::providers::azure::Client;
+use secret_agent::{App, Config, Error};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -17,13 +11,45 @@ use rig::providers::azure::Client;
     author
 )]
 struct Args {
-    /// Path to the Perl module to analyze
-    #[arg(short = 'p', long)]
-    file: PathBuf,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Output format (text or json)
-    #[arg(short = 'o', long, default_value = "text")]
-    format: String,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Parse and analyze a Perl module
+    Parse {
+        /// Path to the Perl module to analyze
+        #[arg(short = 'p', long)]
+        file: PathBuf,
+
+        /// Output format (text or json)
+        #[arg(short = 'o', long, default_value = "text")]
+        format: String,
+        
+        /// Save analysis to file
+        #[arg(short = 's', long)]
+        save: Option<PathBuf>,
+    },
+    
+    /// Generate refactoring proposals for a Perl module
+    Propose {
+        /// Path to the Perl module to refactor
+        #[arg(short = 'p', long)]
+        file: Option<PathBuf>,
+
+        /// Path to a saved analysis file
+        #[arg(short = 'a', long)]
+        analysis: Option<PathBuf>,
+
+        /// Output directory for the generated module files
+        #[arg(short = 'd', long)]
+        output_dir: Option<PathBuf>,
+
+        /// Output format (text or json)
+        #[arg(short = 'o', long, default_value = "text")]
+        format: String,
+    }
 }
 
 #[tokio::main]
@@ -32,49 +58,36 @@ async fn main() -> Result<(), Error> {
     dotenv().ok();
 
     let args = Args::parse();
+    let app = App::new(Config::from_env());
 
-    // Get Azure Openai API key from environment
-    let api_key = env::var("AZURE_API_KEY")
-        .map_err(|_| Error::AIError("AZURE_API_KEY environment variable not set. Please set it in your .env file.".to_string()))?;
-
-    // Get Azure OpenAI API base URL from environment
-    let base_url = env::var("AZURE_API_BASE_URL")
-        .map_err(|_| Error::AIError("AZURE_API_BASE_URL environment variable not set. Please set it in your .env file.".to_string()))?;
-
-    // Get Azure OpenAI API base URL from environment
-    let api_version = env::var("AZURE_API_VERSION")
-        .map_err(|_| Error::AIError("AZURE_API_VERSION environment variable not set. Please set it in your .env file.".to_string()))?;
-
-    // Initialize the parser with API key and base url
-    let client = Client::from_api_key(&api_key, &api_version, &base_url);
-    let agent_builder = client.agent("gpt-4o-2024-08-06");
-    let parser = AIModuleParser::new(agent_builder);
-
-    // Parse and analyze the module
-    let module = parser.parse_module(&args.file).await?;
-
-    // Output the results based on format
-    match args.format.as_str() {
-        "json" => println!("{}", serde_json::to_string_pretty(&module)?),
-        _ => {
-            println!("Module Analysis Results:");
-            println!("Name: {}", module.name);
-            println!("Path: {}", module.path.display());
-            println!("\nDependencies:");
-            for dep in &module.dependencies {
-                println!("  - {}", dep);
-            }
-            println!("\nSubroutines:");
-            for sub in &module.subroutines {
-                println!("\n  {}", sub.name);
-                println!("  Lines: {}-{}", sub.line_start, sub.line_end);
-                if !sub.dependencies.is_empty() {
-                    println!("  Dependencies:");
-                    for dep in &sub.dependencies {
-                        println!("    - {}", dep);
-                    }
+    match &args.command {
+        Commands::Parse { file, format, save } => {
+            app.parse_module(file, format, save.as_ref()).await?;
+        },
+        Commands::Propose { file, analysis, output_dir, format } => {
+            let module = match (file, analysis) {
+                (Some(file_path), None) => {
+                    println!("Analyzing module: {}", file_path.display());
+                    app.parse_module(file_path, format, None).await?
+                },
+                (None, Some(analysis_path)) => {
+                    println!("Loading analysis from: {}", analysis_path.display());
+                    app.load_analysis_from_file(analysis_path)?
+                },
+                (Some(_), Some(_)) => {
+                    return Err(Error::ValidationError(
+                        "Cannot provide both file and analysis. Choose one or the other.".to_string()
+                    ));
+                },
+                (None, None) => {
+                    return Err(Error::ValidationError(
+                        "Must provide either file to analyze or path to saved analysis.".to_string()
+                    ));
                 }
-            }
+            };
+
+            println!("Analysis complete. Found {} responsibility clusters.", module.responsibility_clusters.len());
+            app.propose_refactoring(&module, format, output_dir.as_ref()).await?;
         }
     }
 

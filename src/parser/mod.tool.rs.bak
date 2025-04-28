@@ -16,39 +16,9 @@ use crate::{
     },
     error::Error as AIError,
 };
-
-const ANALYSIS_PROMPT: &str = "Analyze this Perl module and extract its structure and responsibilities. Return ONLY a raw JSON object (no markdown formatting, no code blocks) containing:
-            - package_name: The name of the Perl package/module
-            - subroutines: Array of objects, each containing:
-                - name: Subroutine name
-                - code: The complete subroutine code including its definition
-                - line_start: Starting line number
-                - line_end: Ending line number
-                - dependencies: Array of module/package names this subroutine depends on
-            - dependencies: Array of ALL module/package dependencies, including pragmas like 'strict' and 'warnings'
-            - responsibility_clusters: Array of objects, each containing:
-                - name: A descriptive name for this responsibility cluster
-                - description: A clear explanation of what this group of subroutines does
-                - related_subroutines: Array of subroutine names that belong to this cluster
-                - suggested_module_name: A suggested name for a new module if this cluster were extracted
-                - confidence: A float between 0.0 and 1.0 indicating confidence in this grouping
-
-            IMPORTANT:
-            1. Include ALL dependencies in the dependencies array, including pragmas like 'strict' and 'warnings'
-            2. When identifying responsibility clusters:
-               - Look for groups of subroutines that work together on a specific task
-               - Consider shared dependencies between subroutines
-               - Consider semantic relationships in subroutine names and purposes
-               - Each subroutine can belong to multiple clusters if it serves multiple purposes
-               - Only create clusters when there's a clear cohesive responsibility
-               - Assign high confidence (>0.8) only when the relationship is very clear
-            3. Include the complete subroutine code in the response for each subroutine, do not truncate it.
-            4. Do not include control characters in the response. If there are newlines in the code, they should be represented as \\n in the response.
-
-            Module content:
-            {}
-
-            ";
+use crate::domain::types::{PerlModule, Error};
+use crate::ai::groq;
+use crate::ai::azure;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ParsedSubroutine {
@@ -81,7 +51,39 @@ impl<M: CompletionModel> AIModuleParser<M> {
     }
 
     async fn analyze_code(&self, content: &str) -> Result<ParseResponse, AIError> {
-        let prompt = ANALYSIS_PROMPT.replace("{}", content);
+        let prompt = format!(
+            r#"Analyze this Perl module and extract its structure and responsibilities. Return ONLY a raw JSON object (no markdown formatting, no code blocks) containing:
+            - package_name: The name of the Perl package/module
+            - subroutines: Array of objects, each containing:
+                - name: Subroutine name
+                - code: The complete subroutine code including its definition
+                - line_start: Starting line number
+                - line_end: Ending line number
+                - dependencies: Array of module/package names this subroutine depends on
+            - dependencies: Array of ALL module/package dependencies, including pragmas like 'strict' and 'warnings'
+            - responsibility_clusters: Array of objects, each containing:
+                - name: A descriptive name for this responsibility cluster
+                - description: A clear explanation of what this group of subroutines does
+                - related_subroutines: Array of subroutine names that belong to this cluster
+                - suggested_module_name: A suggested name for a new module if this cluster were extracted
+                - confidence: A float between 0.0 and 1.0 indicating confidence in this grouping
+
+            IMPORTANT:
+            1. Include ALL dependencies in the dependencies array, including pragmas like 'strict' and 'warnings'
+            2. When identifying responsibility clusters:
+               - Look for groups of subroutines that work together on a specific task
+               - Consider shared dependencies between subroutines
+               - Consider semantic relationships in subroutine names and purposes
+               - Each subroutine can belong to multiple clusters if it serves multiple purposes
+               - Only create clusters when there's a clear cohesive responsibility
+               - Assign high confidence (>0.8) only when the relationship is very clear
+            3. Include the complete subroutine code in the response for each subroutine, do not truncate it.
+
+            Module content:
+            {}
+            "#,
+            content
+        );
 
         let response = self
             .agent
@@ -93,6 +95,10 @@ impl<M: CompletionModel> AIModuleParser<M> {
                 print!("{}", e.source().unwrap());
                 AIError::AIError(e.to_string())
             })?;
+
+        println!("******************* RESPONSE ************************");
+        println!("{}", response);
+        println!("******************* END RESPONSE ********************");
 
         let parse_response = serde_json::from_str::<ParseResponse>(&response)
             .map_err(|e| {
@@ -141,6 +147,22 @@ impl<M: CompletionModel> ModuleParser for AIModuleParser<M> {
     }
 }
 
+/// A wrapper type that can hold either parser type
+#[derive(Clone)]
+pub enum Parser {
+    Groq(AIModuleParser<groq::CompletionModel>),
+    Azure(AIModuleParser<azure::CompletionModel>),
+}
+
+impl Parser {
+    pub async fn parse_module(&self, path: impl AsRef<Path>) -> Result<PerlModule, Error> {
+        match self {
+            Parser::Groq(parser) => parser.parse_module(path).await,
+            Parser::Azure(parser) => parser.parse_module(path).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,14 +173,6 @@ mod tests {
     use std::io::Write;
     use rig::providers::azure::Client;
 
-    const TEST_MODULE_CONTENT: &str = r#"package TestModule;
-use strict;
-use warnings;
-use Test::More;
-sub test_sub { };
-1;
-"#;
-
     #[tokio::test]
     async fn test_with_mock_ai() -> Result<(), Box<dyn std::error::Error>> {
         let mock_server = MockServer::start().await;
@@ -167,7 +181,7 @@ sub test_sub { };
             subroutines: vec![
                 ParsedSubroutine {
                     name: "test_sub".to_string(),
-                    code: "sub test_sub { };\n".to_string(),
+                    code: "sub test_sub { }".to_string(),
                     line_start: 1,
                     line_end: 3,
                     dependencies: vec!["Test::More".to_string()],
@@ -191,27 +205,30 @@ sub test_sub { };
             .and(query_param("api-version", "test-version"))
             .and(header("api-key", "test-key"))
             .and(body_json(json!({
-                "messages": [
+                "model": "gpt-4o-2024-08-06",
+                "messages":
+                [
                     {
                         "content": [
                             {
-                                "text": "You are a Perl code analyzer. You will analyze Perl code and extract its structure and identify cohesive responsibilities.",
-                                "type": "text"
+                            "text":"You are a Perl code analyzer. You will analyze Perl code and extract its structure in JSON format.",
+                            "type": "text",
                             }
                         ],
-                        "role": "system"
+                        "role": "system",
                     },
                     {
                         "content": [
-                            {
-                                "text": ANALYSIS_PROMPT.replace("{}", TEST_MODULE_CONTENT),
-                                "type": "text"
+                        {
+                            "text": format!(
+                            "Analyze this Perl module and extract its structure. Return ONLY a raw JSON object (no markdown formatting, no code blocks) containing:\n            - package_name: The name of the Perl package/module\n            - subroutines: Array of objects, each containing:\n                - name: Subroutine name\n                - code: The complete subroutine code including its definition\n                - line_start: Starting line number\n                - line_end: Ending line number\n                - dependencies: Array of module/package names this subroutine depends on\n            - dependencies: Array of ALL module/package dependencies, including pragmas like 'strict' and 'warnings'\n\n            IMPORTANT: Include ALL dependencies in the dependencies array, including pragmas like 'strict' and 'warnings'.\n\n            Module content:\n            {}\n            ",
+                            "package TestModule;\nuse strict;\nuse warnings;\nuse Test::More;\nsub test_sub { }\n1;"),
+                            "type": "text",
                             }
                         ],
-                        "role": "user"
-                    }
+                        "role": "user",
+                    },
                 ],
-                "model": "gpt-4o-2024-08-06",
                 "temperature": null
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -238,7 +255,7 @@ sub test_sub { };
             .await;
 
         let mut temp_file = NamedTempFile::new()?;
-        write!(temp_file, "{}", TEST_MODULE_CONTENT)?;
+        write!(temp_file, "package TestModule;\nuse strict;\nuse warnings;\nuse Test::More;\nsub test_sub {{ }}\n1;")?;
 
         let client = Client::from_api_key("test-key", "test-version", mock_server.uri().as_str());
         let agent_builder = AgentBuilder::new(client.completion_model("gpt-4o-2024-08-06"));

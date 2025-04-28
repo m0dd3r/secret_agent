@@ -8,6 +8,7 @@ pub struct PerlModule {
     pub content: String,
     pub subroutines: Vec<Subroutine>,
     pub dependencies: Vec<String>,
+    pub responsibility_clusters: Vec<ResponsibilityCluster>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,8 +24,8 @@ pub struct Subroutine {
 pub struct ResponsibilityCluster {
     pub name: String,
     pub description: String,
-    pub related_subroutines: Vec<Subroutine>,
-    pub suggested_module_name: String,
+    pub related_subroutines: Vec<String>,
+    pub suggested_module_name: Option<String>,
     pub confidence: f32,
 }
 

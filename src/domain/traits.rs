@@ -38,7 +38,6 @@ pub trait RefactoringProposer: Send + Sync {
     async fn generate_proposal(
         &self,
         module: &PerlModule,
-        responsibilities: &[ResponsibilityCluster]
     ) -> Result<RefactoringProposal, Error>;
 }
 

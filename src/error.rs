@@ -1,57 +1,46 @@
-use std::fmt;
-use std::io;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Error occurred while parsing a Perl module
+    #[error("Parse error: {0}")]
     ParseError(String),
     
     /// Error occurred during responsibility analysis
+    #[error("Analysis error: {0}")]
     AnalysisError(String),
     
     /// Error occurred during validation
+    #[error("Validation error: {0}")]
     ValidationError(String),
     
     /// Error occurred while interacting with AI service
+    #[error("AI service error: {0}")]
     AIError(String),
     
     /// IO error occurred
-    IOError(io::Error),
+    #[error("I/O error: {0}")]
+    IOError(#[from] std::io::Error),
 
     /// JSON serialization/deserialization error
-    SerdeError(String),
-}
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::ParseError(msg) => write!(f, "Parse error: {}", msg),
-            Error::AnalysisError(msg) => write!(f, "Analysis error: {}", msg),
-            Error::ValidationError(msg) => write!(f, "Validation error: {}", msg),
-            Error::AIError(msg) => write!(f, "AI service error: {}", msg),
-            Error::IOError(err) => write!(f, "IO error: {}", err),
-            Error::SerdeError(msg) => write!(f, "Serialization error: {}", msg),
-        }
-    }
-}
+    /// JSON deserialization error
+    #[error("Deserialization error: {0}")]
+    DeserializationError(String),
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::IOError(err) => Some(err),
-            _ => None,
-        }
-    }
-}
+    /// No AI provider available
+    #[error("No AI provider available")]
+    NoAIProvider,
 
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        Error::IOError(err)
-    }
+    /// Missing environment variable
+    #[error("Missing environment variable: {0}")]
+    MissingEnvVar(String),
 }
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
-        Error::SerdeError(err.to_string())
+        Error::SerializationError(err.to_string())
     }
 } 

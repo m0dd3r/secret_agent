@@ -14,6 +14,7 @@ mod tests {
             content: "package Test::Module;\n\nuse strict;\n".to_string(),
             subroutines: vec![],
             dependencies: vec![],
+            responsibility_clusters: vec![],
         };
 
         assert_eq!(module.name, "Test::Module");
@@ -40,28 +41,13 @@ mod tests {
         let cluster = ResponsibilityCluster {
             name: "Data validation".to_string(),
             description: "Handles input validation logic".to_string(),
-            related_subroutines: vec![
-                Subroutine {
-                    name: "validate_input".to_string(),
-                    code: "sub validate_input { ... }".to_string(),
-                    line_start: 1,
-                    line_end: 5,
-                    dependencies: vec![],
-                },
-                Subroutine {
-                    name: "check_format".to_string(),
-                    code: "sub check_format { ... }".to_string(),
-                    line_start: 7,
-                    line_end: 10,
-                    dependencies: vec![],
-                },
-            ],
-            suggested_module_name: "MyApp::Validation".to_string(),
+            related_subroutines: vec!["validate_input".to_string(), "check_format".to_string()],
+            suggested_module_name: Some("MyApp::Validation".to_string()),
             confidence: 0.85,
         };
 
         assert_eq!(cluster.name, "Data validation");
         assert_eq!(cluster.related_subroutines.len(), 2);
-        assert_eq!(cluster.suggested_module_name, "MyApp::Validation");
+        assert_eq!(cluster.suggested_module_name.unwrap(), "MyApp::Validation");
     }
 } 

@@ -1,0 +1,50 @@
+{
+    "name": "Calculator",
+    "path": "tests/data/Calculator.pm",
+    "content": "package Calculator;\n\nuse strict;\nuse warnings;\nuse Math::Complex;\nuse List::Util qw(sum);\n\nsub add {\n    my ($a, $b) = @_;\n    return $a + $b;\n}\n\nsub multiply {\n    my ($a, $b) = @_;\n    return $a * $b;\n}\n\nsub calculate_average {\n    my @numbers = @_;\n    return 0 if !@numbers;\n    return sum(@numbers) / scalar(@numbers);\n}\n\n1;",
+    "subroutines": [
+        {
+            "name": "add",
+            "code": "sub add {\n    my ($a, $b) = @_;\n    return $a + $b;\n}",
+            "line_start": 8,
+            "line_end": 11,
+            "dependencies": []
+        },
+        {
+            "name": "multiply",
+            "code": "sub multiply {\n    my ($a, $b) = @_;\n    return $a * $b;\n}",
+            "line_start": 12,
+            "line_end": 15,
+            "dependencies": []
+        },
+        {
+            "name": "calculate_average",
+            "code": "sub calculate_average {\n    my @numbers = @_;\n    return 0 if !@numbers;\n    return sum(@numbers) / scalar(@numbers);\n}",
+            "line_start": 16,
+            "line_end": 20,
+            "dependencies": ["List::Util"]
+        }
+    ],
+    "dependencies": [
+        "strict",
+        "warnings", 
+        "Math::Complex",
+        "List::Util"
+    ],
+    "responsibility_clusters": [
+        {
+            "name": "Arithmetic Operations",
+            "description": "This cluster includes basic arithmetic operations, such as addition and multiplication.",
+            "related_subroutines": ["add", "multiply"],
+            "suggested_module_name": "Arithmetic",
+            "confidence": 0.9
+        },
+        {
+            "name": "Statistical Calculations",
+            "description": "This cluster includes calculations for statistical purposes, such as calculating the average.",
+            "related_subroutines": ["calculate_average"],
+            "suggested_module_name": "Statistics",
+            "confidence": 0.8
+        }
+    ]
+}
